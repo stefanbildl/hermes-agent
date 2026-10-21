@@ -149,6 +149,15 @@ def _watch_notification_metadata(evt: dict, source) -> dict[str, Any]:
         metadata["gateway_proven_session_id"] = proven_session_id
     if completion_ids := evt.get("completion_ids"):
         metadata["gateway_completion_ids"] = list(completion_ids)
+    # Preserve the producer's exact Telegram topic. Background events already carry
+    # an owner route; no lobby recovery should be needed for them.
+    event_thread_id = str(evt.get("thread_id") or "").strip() or None
+    if event_thread_id:
+        metadata["thread_id"] = event_thread_id
+        if source.platform == Platform.TELEGRAM and getattr(source, "chat_type", None) == "dm":
+            metadata["telegram_dm_topic_reply_fallback"] = True
+            if event_thread_id not in {"", "1"}:
+                metadata["direct_messages_topic_id"] = event_thread_id
     return metadata
 
 
@@ -822,6 +831,13 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         """
         from gateway.wake import WakeNotAccepted, adapter_supports_push, admit_internal_event
         source = await asyncio.to_thread(self._build_process_event_source, evt)
+        # A persisted session origin is authoritative for background delivery. Do not
+        # apply Telegram's lobby recovery here: a missing/General thread must not be
+        # rewritten to whichever topic happens to be newest.
+        producer_thread = str(evt.get("thread_id") or "").strip() or None
+        if source is not None and producer_thread:
+            from gateway.session_identity import replace_source
+            source = replace_source(source, thread_id=producer_thread)
         if not source:
             # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
             raw_sid = _raw_process_event_session_id(evt)
@@ -854,6 +870,9 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
         try:
             synth_text = _mark_internal_notification(synth_text)
+            # Keep synthetic notifications tied to the process owner's stamped route.
+            # In particular, never recover a missing/General DM topic from the user's
+            # newest binding: that fallback can redirect a completion into an older topic.
             metadata = _watch_notification_metadata(evt, source)
             # The queued event's ``message_id`` is the message that STARTED the process, and the
             # persisted origin carries the same stale id. A synthetic completion is not a reply to
@@ -1578,16 +1597,24 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         if not session_key:
             return False
         source = await asyncio.to_thread(self._build_process_event_source, watcher)
+        producer_thread = str(watcher.get("thread_id") or "").strip() or None
+        if source is not None and producer_thread:
+            from gateway.session_identity import replace_source
+            source = replace_source(source, thread_id=producer_thread)
         adapter = self._resolve_injection_adapter(platform_name, source)
         return session_key in (getattr(adapter, "_active_sessions", None) or {})
 
     async def _send_watcher_message(self, platform_name: str, chat_id, thread_id, message_text: str, watcher: dict) -> None:
         from gateway.run import _non_conversational_metadata
         source = await asyncio.to_thread(self._build_process_event_source, watcher)
+        producer_thread = str(watcher.get("thread_id") or thread_id or "").strip() or None
+        if source is not None and producer_thread:
+            from gateway.session_identity import replace_source
+            source = replace_source(source, thread_id=producer_thread)
         adapter = self._resolve_injection_adapter(platform_name, source)
         if adapter and chat_id:
             with _log_suppressed(logging.ERROR, "Watcher delivery error: %s"):
-                send_meta = {"thread_id": thread_id} if thread_id else None
+                send_meta = {"thread_id": producer_thread} if producer_thread else None
                 await adapter.send(
                     chat_id, message_text, metadata=_non_conversational_metadata(send_meta, platform=platform_name),
                 )

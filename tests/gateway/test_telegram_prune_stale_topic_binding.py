@@ -227,31 +227,25 @@ class TestRecoveryAfterPrune:
             }
         )
         runner._session_db = db
-        runner._telegram_topic_mode_enabled = lambda _src: True
+        runner._telegram_topic_mode_enabled = lambda source: True
 
-        # Sanity: before the prune, recovery picks "222" (newest).
-        # Recovery only fires for a lobby-shaped inbound (omitted
-        # message_thread_id or General topic "1"); a non-lobby
-        # unknown thread is preserved as a brand-new topic. Use the
-        # General topic id so the recovery walk actually runs.
+        # A General-topic message does not acquire an unrelated topic route.
         before = runner._recover_telegram_topic_thread_id(SessionSource(
             platform=Platform.TELEGRAM,
             user_id="5595856929",
             chat_id="5595856929",
             user_name="tester",
             chat_type="dm",
-            thread_id="1",  # General/stripped reply — triggers recovery
+            thread_id="1",
         ))
-        assert before == "222"
+        assert before is None
 
         # User deletes topic 222 in Telegram → adapter prunes.
         db.delete_telegram_topic_binding(
             chat_id="5595856929", thread_id="222",
         )
 
-        # Now recovery falls back to topic 111 (the surviving
-        # binding) instead of the dead one.  This is the exact
-        # behaviour change the bug report asks for.
+        # Pruning a stale binding does not change the General-topic route.
         after = runner._recover_telegram_topic_thread_id(SessionSource(
             platform=Platform.TELEGRAM,
             user_id="5595856929",
@@ -260,5 +254,5 @@ class TestRecoveryAfterPrune:
             chat_type="dm",
             thread_id="1",
         ))
-        assert after == "111"
+        assert after is None
         db.close()

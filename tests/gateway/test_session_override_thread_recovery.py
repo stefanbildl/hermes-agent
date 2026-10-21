@@ -1,17 +1,7 @@
-"""Regression tests for #30479 — session-scoped /model and /reasoning overrides
-silently lost on Telegram forum/DM topics and after compression session splits.
+"""Session-scoped override keys must preserve the actual Telegram topic.
 
-Root cause: ``_handle_message_with_agent`` rewrites ``source.thread_id`` via
-``_recover_telegram_topic_thread_id`` (lobby/stripped reply -> the user's
-last-active bound topic) *before* deriving the session key for a message turn.
-The ``/model`` and ``/reasoning`` command handlers derived their override key
-from the raw inbound ``event.source``, skipping that recovery — so the override
-was stored under one key and the next message turn read a different key, and the
-override was dropped.
-
-Fix: both command handlers normalize the source via
-``_normalize_source_for_session_key`` before deriving the override key, so
-storage and read keys are identical.
+No message from General may inherit the last-active topic's key: a missing
+thread id cannot identify which conversation the user intended.
 """
 
 import threading
@@ -49,15 +39,12 @@ def _topic_dm_source(thread_id):
     )
 
 
-def test_normalize_rewrites_lobby_thread_to_bound_topic():
-    """A lobby (stripped) reply gets pinned to the user's bound topic id."""
-    runner = _make_runner(recovered_thread_id="42")
-    src = _topic_dm_source(thread_id="")  # lobby/General — no message_thread_id
-
-    normalized = runner._normalize_source_for_session_key(src)
-
-    assert normalized.thread_id == "42"
-    # Original source is left untouched (we return a copy).
-    assert src.thread_id == ""
+def test_normalize_preserves_lobby_and_explicit_topics():
+    """An absent thread cannot identify a topic, even when an older binding exists."""
+    runner = _make_runner(recovered_thread_id=None)
+    for thread_id in ("", "1", "42"):
+        src = _topic_dm_source(thread_id=thread_id)
+        normalized = runner._normalize_source_for_session_key(src)
+        assert normalized.thread_id == thread_id
 
 
